@@ -1,0 +1,150 @@
+<?php
+
+/**
+ * @file
+ * Contains Slack Asset Status Change module code.
+ */
+
+use Drupal\Core\Entity\EntityInterface;
+
+/**
+ * Implements hook_entity_presave().
+ *
+ * For nodes of bundle "item", stores the original status taxonomy term ID.
+ */
+function slack_asset_status_change_entity_presave(EntityInterface $entity) {
+  if ($entity->getEntityTypeId() === 'node' &&
+      $entity->bundle() === 'item' &&
+      $entity->hasField('field_item_status') &&
+      !$entity->isNew()) {
+    if (isset($entity->original)) {
+      $original_node = $entity->original;
+      if ($original_node->hasField('field_item_status')) {
+        $original_tid = $original_node->get('field_item_status')->target_id;
+        // Store as a temporary property.
+        $entity->original_status_tid = $original_tid;
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_entity_update().
+ *
+ * Checks if the status field changed and posts to Slack.
+ */
+function slack_asset_status_change_entity_update(EntityInterface $entity) {
+  if ($entity->getEntityTypeId() === 'node' &&
+      $entity->bundle() === 'item' &&
+      $entity->hasField('field_item_status')) {
+    $new_tid = $entity->get('field_item_status')->target_id;
+    if (isset($entity->original_status_tid) && $entity->original_status_tid != $new_tid) {
+      // Load taxonomy term objects.
+      $old_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($entity->original_status_tid);
+      $new_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($new_tid);
+      $old_status = $old_term ? $old_term->label() : '';
+      $new_status = $new_term ? $new_term->label() : '';
+      $asset_name = $entity->label();
+
+      // Determine the Slack channel.
+      $slack_channel = '';
+      if ($entity->hasField('field_item_slack_channel') && !$entity->get('field_item_slack_channel')->isEmpty()) {
+        $slack_channel = $entity->get('field_item_slack_channel')->value;
+      }
+      else {
+        // Fallback to category Slack channel.
+        if ($entity->hasField('field_item_area_interest') && !$entity->get('field_item_area_interest')->isEmpty()) {
+          $interest_tid = $entity->get('field_item_area_interest')->target_id;
+          $term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($interest_tid);
+          if ($term && $term->hasField('field_interest_slack_channel') && !$term->get('field_interest_slack_channel')->isEmpty()) {
+            $slack_channel = $term->get('field_interest_slack_channel')->value;
+          }
+        }
+      }
+
+      \Drupal::messenger()->addMessage(t('Attempting to post to Slack channel: @channel', ['@channel' => $slack_channel]));
+      $message = "$asset_name has been changed from $old_status to $new_status.";
+
+      \Drupal::logger('slack_asset_status_change')->notice('Prepared message: @message', ['@message' => $message]);
+      \Drupal::logger('slack_asset_status_change')->notice('Attempting to post to Slack channel: @channel', ['@channel' => $slack_channel]);
+
+      slack_asset_status_change_post_to_slack($slack_channel, $message);
+    }
+    else {
+      \Drupal::logger('slack_asset_status_change')->notice('Status field did not change for node ID: @nid', ['@nid' => $entity->id()]);
+    }
+  }
+}
+
+/**
+ * Posts a message to the specified Slack channel.
+ */
+function slack_asset_status_change_post_to_slack($channel, $message) {
+  // Load the Slack webhook URL from Slack Connector configuration.
+  $connector_config = \Drupal::config('slack_connector.settings');
+  $webhook_url = $connector_config->get('webhook_url');
+
+  if (empty($webhook_url)) {
+    \Drupal::logger('slack_asset_status_change')->error('Slack webhook URL is not configured in Slack Connector.');
+    return;
+  }
+
+  \Drupal::logger('slack_asset_status_change')->notice('Posting to Slack with webhook URL: @url', ['@url' => $webhook_url]);
+
+  $payload = json_encode([
+    'channel' => $channel,
+    'text' => $message,
+  ]);
+
+  $ch = curl_init($webhook_url);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+  curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+  curl_setopt($ch, CURLOPT_POST, TRUE);
+  curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+
+  $result = curl_exec($ch);
+  if ($result === FALSE) {
+    \Drupal::logger('slack_asset_status_change')->error('CURL error: @error', ['@error' => curl_error($ch)]);
+  }
+  else {
+    \Drupal::logger('slack_asset_status_change')->notice('Slack response: @response', ['@response' => $result]);
+  }
+
+  curl_close($ch);
+}
+
+/**
+ * Helper function for the Rules action.
+ * Sends a Slack message for a given node.
+ */
+function slack_asset_status_change_send_message_from_node($node) {
+  if ($node->bundle() === 'item' && $node->hasField('field_item_status')) {
+    // Use the stored original status if available.
+    $original_tid = isset($node->original_status_tid) ? $node->original_status_tid : $node->get('field_item_status')->target_id;
+    $new_tid = $node->get('field_item_status')->target_id;
+    $old_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($original_tid);
+    $new_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($new_tid);
+    $old_status = $old_term ? $old_term->label() : '';
+    $new_status = $new_term ? $new_term->label() : '';
+    $asset_name = $node->label();
+
+    $slack_channel = '';
+    if ($node->hasField('field_item_slack_channel') && !$node->get('field_item_slack_channel')->isEmpty()) {
+      $slack_channel = $node->get('field_item_slack_channel')->value;
+    }
+    else {
+      if ($node->hasField('field_item_area_interest') && !$node->get('field_item_area_interest')->isEmpty()) {
+        $interest_tid = $node->get('field_item_area_interest')->target_id;
+        $term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($interest_tid);
+        if ($term && $term->hasField('field_interest_slack_channel') && !$term->get('field_interest_slack_channel')->isEmpty()) {
+          $slack_channel = $term->get('field_interest_slack_channel')->value;
+        }
+      }
+    }
+
+    \Drupal::messenger()->addMessage(t('Attempting to post to Slack channel: @channel', ['@channel' => $slack_channel]));
+    $message = "$asset_name has been changed from $old_status to $new_status.";
+    \Drupal::logger('slack_asset_status_change')->notice('Prepared message: @message', ['@message' => $message]);
+    slack_asset_status_change_post_to_slack($slack_channel, $message);
+  }
+}

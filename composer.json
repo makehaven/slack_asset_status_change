@@ -1,0 +1,6 @@
+{
+    "name": "makehaven/slack_asset_status_change",
+    "type": "drupal-custom-module",
+    "description": "Posts to Slack when the status field of a tool node changes.",
+    "license": "GPL-2.0-or-later"
+}
