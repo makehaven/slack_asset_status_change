@@ -2,7 +2,7 @@ name: Slack Asset Status Change
 type: module
 description: 'Posts to Slack when the status field of a tool node changes.'
 package: Custom
-core_version_requirement: ^10
+core_version_requirement: ^10 || ^11
 version: 1.0
 dependencies:
   - drupal:taxonomy
