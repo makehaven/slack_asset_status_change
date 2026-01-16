@@ -64,6 +64,9 @@ function slack_asset_status_change_entity_update(EntityInterface $entity) {
 
       \Drupal::messenger()->addMessage(t('Attempting to post to Slack channel: @channel', ['@channel' => $slack_channel]));
       $message = "$asset_name has been changed from $old_status to $new_status.";
+      if (isset($entity->_asset_status_log_message) && !empty($entity->_asset_status_log_message)) {
+        $message .= "\nReason/Details: " . $entity->_asset_status_log_message;
+      }
 
       \Drupal::logger('slack_asset_status_change')->notice('Prepared message: @message', ['@message' => $message]);
       \Drupal::logger('slack_asset_status_change')->notice('Attempting to post to Slack channel: @channel', ['@channel' => $slack_channel]);
@@ -80,6 +83,12 @@ function slack_asset_status_change_entity_update(EntityInterface $entity) {
  * Posts a message to the specified Slack channel.
  */
 function slack_asset_status_change_post_to_slack($channel, $message) {
+  // Check if we are on the production site.
+  $host = \Drupal::request()->getHost();
+  if ($host !== "makehaven.org" && $host !== "www.makehaven.org") {
+    \Drupal::logger("slack_asset_status_change")->notice("Skipping Slack post on non-production environment: @host", ["@host" => $host]);
+    return;
+  }
   // Load the Slack webhook URL from Slack Connector configuration.
   $connector_config = \Drupal::config('slack_connector.settings');
   $webhook_url = $connector_config->get('webhook_url');
@@ -144,6 +153,9 @@ function slack_asset_status_change_send_message_from_node($node) {
 
     \Drupal::messenger()->addMessage(t('Attempting to post to Slack channel: @channel', ['@channel' => $slack_channel]));
     $message = "$asset_name has been changed from $old_status to $new_status.";
+      if (isset($entity->_asset_status_log_message) && !empty($entity->_asset_status_log_message)) {
+        $message .= "\nReason/Details: " . $entity->_asset_status_log_message;
+      }
     \Drupal::logger('slack_asset_status_change')->notice('Prepared message: @message', ['@message' => $message]);
     slack_asset_status_change_post_to_slack($slack_channel, $message);
   }
