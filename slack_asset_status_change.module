@@ -81,6 +81,14 @@ function slack_asset_status_change_entity_update(EntityInterface $entity) {
  * Posts a message to the specified Slack channel.
  */
 function slack_asset_status_change_post_to_slack($channel, $message) {
+  // Only post on the Pantheon live environment. On dev, test, and local Lando
+  // the PANTHEON_ENVIRONMENT variable is either absent or not 'live'.
+  $env = $_ENV['PANTHEON_ENVIRONMENT'] ?? getenv('PANTHEON_ENVIRONMENT') ?: NULL;
+  if ($env !== 'live') {
+    \Drupal::logger('slack_asset_status_change')->notice('Skipping Slack post on @env environment.', ['@env' => $env ?? 'local']);
+    return;
+  }
+
   $webhook_url = \Drupal::config('slack_connector.settings')->get('webhook_url');
 
   if (empty($webhook_url)) {
