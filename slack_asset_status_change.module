@@ -39,42 +39,117 @@ function slack_asset_status_change_entity_update(EntityInterface $entity) {
       $entity->hasField('field_item_status')) {
     $new_tid = $entity->get('field_item_status')->target_id;
     if (isset($entity->original_status_tid) && $entity->original_status_tid != $new_tid) {
-      // Load taxonomy term objects.
-      $old_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($entity->original_status_tid);
-      $new_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($new_tid);
-      $old_status = $old_term ? $old_term->label() : '';
-      $new_status = $new_term ? $new_term->label() : '';
-      $asset_name = $entity->label();
-
-      // Determine the Slack channel.
-      $slack_channel = '';
-      if ($entity->hasField('field_item_slack_channel') && !$entity->get('field_item_slack_channel')->isEmpty()) {
-        $slack_channel = $entity->get('field_item_slack_channel')->value;
-      }
-      else {
-        // Fallback to category Slack channel.
-        if ($entity->hasField('field_item_area_interest') && !$entity->get('field_item_area_interest')->isEmpty()) {
-          $interest_tid = $entity->get('field_item_area_interest')->target_id;
-          $term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($interest_tid);
-          if ($term && $term->hasField('field_interest_slack_channel') && !$term->get('field_interest_slack_channel')->isEmpty()) {
-            $slack_channel = $term->get('field_interest_slack_channel')->value;
-          }
-        }
-      }
-
-      $message = "$asset_name has been changed from $old_status to $new_status.";
-      if (!empty($entity->_asset_status_log_message)) {
-        $message .= "\nReason/Details: " . $entity->_asset_status_log_message;
-      }
-
-      \Drupal::logger('slack_asset_status_change')->notice('Posting status change to Slack channel @channel: @message', ['@channel' => $slack_channel, '@message' => $message]);
-
-      slack_asset_status_change_post_to_slack($slack_channel, $message);
+      slack_asset_status_change_notify($entity, $entity->original_status_tid, $new_tid);
     }
     else {
       \Drupal::logger('slack_asset_status_change')->notice('Status field did not change for node ID: @nid', ['@nid' => $entity->id()]);
     }
   }
+}
+
+/**
+ * The status a member report lands in before staff have looked at it.
+ *
+ * Mirrors \Drupal\asset_status\Service\AssetAvailability, which treats this
+ * label as "still usable, not confirmed by staff".
+ */
+const SLACK_ASSET_STATUS_CHANGE_UNCONFIRMED = 'Reported Concern';
+
+/**
+ * Decides whether a status transition is worth telling the tool channel.
+ *
+ * The tool's Slack channel is a member channel. It should hear about
+ * confirmed changes only: a tool going Offline or Degraded after staff have
+ * looked at it, coming back to Operational, being retired. An unconfirmed
+ * member report (Reported Concern) is not announced, and neither is that
+ * report being cleared back to Operational, because nothing was announced
+ * in the first place. The shop manager's reminders about unconfirmed
+ * reports come from asset_status's stale monitor, in the staff channel.
+ *
+ * @param string|null $old_status
+ *   Label of the previous status term, or NULL/'' when unknown.
+ * @param string|null $new_status
+ *   Label of the new status term, or NULL/'' when unknown.
+ *
+ * @return bool
+ *   TRUE when the transition should be posted.
+ */
+function slack_asset_status_change_should_post(?string $old_status, ?string $new_status): bool {
+  $old_status = trim((string) $old_status);
+  $new_status = trim((string) $new_status);
+  if ($new_status === '' || $old_status === $new_status) {
+    return FALSE;
+  }
+  if ($new_status === SLACK_ASSET_STATUS_CHANGE_UNCONFIRMED) {
+    return FALSE;
+  }
+  if ($old_status === SLACK_ASSET_STATUS_CHANGE_UNCONFIRMED && $new_status === 'Operational') {
+    return FALSE;
+  }
+  return TRUE;
+}
+
+/**
+ * Resolves the Slack channel for a tool: its own, else its area's.
+ */
+function slack_asset_status_change_channel_for($node): string {
+  if ($node->hasField('field_item_slack_channel') && !$node->get('field_item_slack_channel')->isEmpty()) {
+    return (string) $node->get('field_item_slack_channel')->value;
+  }
+  if ($node->hasField('field_item_area_interest') && !$node->get('field_item_area_interest')->isEmpty()) {
+    $interest_tid = $node->get('field_item_area_interest')->target_id;
+    $term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($interest_tid);
+    if ($term && $term->hasField('field_interest_slack_channel') && !$term->get('field_interest_slack_channel')->isEmpty()) {
+      return (string) $term->get('field_interest_slack_channel')->value;
+    }
+  }
+  return '';
+}
+
+/**
+ * Builds and posts the tool-channel message for one status transition.
+ *
+ * @param \Drupal\Core\Entity\EntityInterface $node
+ *   The tool node.
+ * @param int|string|null $old_tid
+ *   Previous status term ID.
+ * @param int|string|null $new_tid
+ *   New status term ID.
+ */
+function slack_asset_status_change_notify(EntityInterface $node, $old_tid, $new_tid): void {
+  $storage = \Drupal::entityTypeManager()->getStorage('taxonomy_term');
+  $old_term = $old_tid ? $storage->load($old_tid) : NULL;
+  $new_term = $new_tid ? $storage->load($new_tid) : NULL;
+  $old_status = $old_term ? $old_term->label() : '';
+  $new_status = $new_term ? $new_term->label() : '';
+  $asset_name = $node->label();
+  $logger = \Drupal::logger('slack_asset_status_change');
+
+  if (!slack_asset_status_change_should_post($old_status, $new_status)) {
+    $logger->notice('Not announcing @from → @to for @title (nid @nid): unconfirmed status.', [
+      '@from' => $old_status,
+      '@to' => $new_status,
+      '@title' => $asset_name,
+      '@nid' => $node->id(),
+    ]);
+    return;
+  }
+
+  // The channel never heard about an unconfirmed report, so a transition out
+  // of it reads as a plain announcement rather than a change.
+  if ($old_status === SLACK_ASSET_STATUS_CHANGE_UNCONFIRMED || $old_status === '') {
+    $message = "$asset_name is now $new_status.";
+  }
+  else {
+    $message = "$asset_name has been changed from $old_status to $new_status.";
+  }
+  if (!empty($node->_asset_status_log_message)) {
+    $message .= "\nReason/Details: " . $node->_asset_status_log_message;
+  }
+
+  $slack_channel = slack_asset_status_change_channel_for($node);
+  $logger->notice('Posting status change to Slack channel @channel: @message', ['@channel' => $slack_channel, '@message' => $message]);
+  slack_asset_status_change_post_to_slack($slack_channel, $message);
 }
 
 /**
@@ -118,33 +193,8 @@ function slack_asset_status_change_post_to_slack($channel, $message) {
 function slack_asset_status_change_send_message_from_node($node) {
   if ($node->bundle() === 'item' && $node->hasField('field_item_status')) {
     // Use the stored original status if available.
-    $original_tid = isset($node->original_status_tid) ? $node->original_status_tid : $node->get('field_item_status')->target_id;
     $new_tid = $node->get('field_item_status')->target_id;
-    $old_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($original_tid);
-    $new_term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($new_tid);
-    $old_status = $old_term ? $old_term->label() : '';
-    $new_status = $new_term ? $new_term->label() : '';
-    $asset_name = $node->label();
-
-    $slack_channel = '';
-    if ($node->hasField('field_item_slack_channel') && !$node->get('field_item_slack_channel')->isEmpty()) {
-      $slack_channel = $node->get('field_item_slack_channel')->value;
-    }
-    else {
-      if ($node->hasField('field_item_area_interest') && !$node->get('field_item_area_interest')->isEmpty()) {
-        $interest_tid = $node->get('field_item_area_interest')->target_id;
-        $term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($interest_tid);
-        if ($term && $term->hasField('field_interest_slack_channel') && !$term->get('field_interest_slack_channel')->isEmpty()) {
-          $slack_channel = $term->get('field_interest_slack_channel')->value;
-        }
-      }
-    }
-
-    $message = "$asset_name has been changed from $old_status to $new_status.";
-    if (!empty($node->_asset_status_log_message)) {
-      $message .= "\nReason/Details: " . $node->_asset_status_log_message;
-    }
-    \Drupal::logger('slack_asset_status_change')->notice('Posting status change to Slack channel @channel: @message', ['@channel' => $slack_channel, '@message' => $message]);
-    slack_asset_status_change_post_to_slack($slack_channel, $message);
+    $original_tid = isset($node->original_status_tid) ? $node->original_status_tid : $new_tid;
+    slack_asset_status_change_notify($node, $original_tid, $new_tid);
   }
 }

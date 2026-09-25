@@ -27,4 +27,5 @@ class SlackAssetStatusChangeSendMessage extends RulesActionBase {
       slack_asset_status_change_send_message_from_node($node);
     }
   }
+
 }
