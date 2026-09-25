@@ -103,7 +103,35 @@ function slack_asset_status_change_channel_for($node): string {
       return (string) $term->get('field_interest_slack_channel')->value;
     }
   }
+  // One machine of a multi-unit tool carries no channel of its own: use the
+  // tool's (asset_status's unit manager knows the parent).
+  $parent = slack_asset_status_change_unit_parent($node);
+  if ($parent) {
+    return slack_asset_status_change_channel_for($parent);
+  }
   return '';
+}
+
+/**
+ * The tool a unit belongs to, or NULL for an ordinary tool.
+ *
+ * Optional integration with asset_status's multi-unit tools: without that
+ * service every node is its own tool.
+ */
+function slack_asset_status_change_unit_parent($node) {
+  if (!\Drupal::hasService('asset_status.units')) {
+    return NULL;
+  }
+  $units = \Drupal::service('asset_status.units');
+  return $units->isUnit($node) ? $units->getParent($node) : NULL;
+}
+
+/**
+ * "Laser 2 (32x18 ULS Laser Cutter)" for a unit, the plain title otherwise.
+ */
+function slack_asset_status_change_display_title($node): string {
+  $parent = slack_asset_status_change_unit_parent($node);
+  return $parent ? sprintf('%s (%s)', $node->label(), $parent->label()) : (string) $node->label();
 }
 
 /**
@@ -122,7 +150,7 @@ function slack_asset_status_change_notify(EntityInterface $node, $old_tid, $new_
   $new_term = $new_tid ? $storage->load($new_tid) : NULL;
   $old_status = $old_term ? $old_term->label() : '';
   $new_status = $new_term ? $new_term->label() : '';
-  $asset_name = $node->label();
+  $asset_name = slack_asset_status_change_display_title($node);
   $logger = \Drupal::logger('slack_asset_status_change');
 
   if (!slack_asset_status_change_should_post($old_status, $new_status)) {

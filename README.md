@@ -24,6 +24,13 @@ it comes from `asset_status`'s stale monitor and goes to the staff channel
 The decision lives in `slack_asset_status_change_should_post()`; its table is
 covered by `tests/src/Unit/ShouldPostTest.php`.
 
+## Multi-unit tools
+
+When `asset_status` marks a node as one machine of a multi-unit tool (category
+"Machine Unit", listed in its tool's `field_item_set`), the message names both:
+"Laser 2 (32x18 ULS Laser Cutter) is now Offline for Maintenance." and the
+channel falls back to the tool's when the machine has none.
+
 ## Configuration
 
 Webhook URL from `slack_connector.settings:webhook_url`. No settings of its own.
